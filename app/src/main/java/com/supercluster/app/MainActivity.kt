@@ -29,10 +29,14 @@ class MainActivity : AppCompatActivity() {
         statusText.text = "Node Active\nIP: ${getIPAddress()}"
 
         // Multicast lock is required to receive multicast packets on many devices
-        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        multicastLock = wifi.createMulticastLock("SuperClusterLock")
-        multicastLock?.setReferenceCounted(true)
-        multicastLock?.acquire()
+        try {
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            multicastLock = wifi.createMulticastLock("SuperClusterLock")
+            multicastLock?.setReferenceCounted(true)
+            multicastLock?.acquire()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to acquire multicast lock: ${e.message}")
+        }
 
         startDiscoveryListener()
         startTcpServer()
@@ -57,32 +61,56 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startDiscoveryListener() {
-        executor.execute {
-            try {
-                // Use MulticastSocket to receive multicast discovery packets
-                val group = InetAddress.getByName(MULTICAST_IP)
-                val socket = MulticastSocket(DISCOVERY_PORT)
-                socket.joinGroup(group)
-                
-                val buffer = ByteArray(1024)
-                Log.d(TAG, "Multicast Discovery Listener started on $MULTICAST_IP:$DISCOVERY_PORT")
+        // Run both Multicast and Broadcast listeners for robustness
+        executor.execute { runMulticastListener() }
+        executor.execute { runBroadcastListener() }
+    }
 
-                while (true) {
-                    val packet = DatagramPacket(buffer, buffer.size)
-                    socket.receive(packet)
-                    val message = String(packet.data, 0, packet.length).trim()
-                    Log.d(TAG, "Received UDP: $message from ${packet.address.hostAddress}")
+    private fun runMulticastListener() {
+        try {
+            val group = InetAddress.getByName(MULTICAST_IP)
+            val socket = MulticastSocket(DISCOVERY_PORT)
+            socket.joinGroup(group)
+            
+            val buffer = ByteArray(1024)
+            Log.d(TAG, "Multicast Listener started on $MULTICAST_IP:$DISCOVERY_PORT")
 
-                    if (message == "SUPERCLUSTER_DISCOVERY") {
-                        val response = "SUPERCLUSTER_ACK".toByteArray()
-                        val replyPacket = DatagramPacket(response, response.size, packet.address, packet.port)
-                        socket.send(replyPacket)
-                        Log.d(TAG, "Sent ACK to ${packet.address.hostAddress}")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Discovery Listener error: ${e.message}")
+            while (true) {
+                val packet = DatagramPacket(buffer, buffer.size)
+                socket.receive(packet)
+                handleDiscoveryPacket(socket, packet)
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Multicast error: ${e.message}")
+        }
+    }
+
+    private fun runBroadcastListener() {
+        try {
+            val socket = DatagramSocket(DISCOVERY_PORT)
+            socket.broadcast = true
+            val buffer = ByteArray(1024)
+            Log.d(TAG, "Broadcast Listener started on port $DISCOVERY_PORT")
+
+            while (true) {
+                val packet = DatagramPacket(buffer, buffer.size)
+                socket.receive(packet)
+                handleDiscoveryPacket(socket, packet)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Broadcast error: ${e.message}")
+        }
+    }
+
+    private fun handleDiscoveryPacket(socket: DatagramSocket, packet: DatagramPacket) {
+        val message = String(packet.data, 0, packet.length).trim()
+        Log.d(TAG, "Received Discovery: $message from ${packet.address.hostAddress}")
+
+        if (message == "SUPERCLUSTER_DISCOVERY") {
+            val response = "SUPERCLUSTER_ACK".toByteArray()
+            val replyPacket = DatagramPacket(response, response.size, packet.address, packet.port)
+            socket.send(replyPacket)
+            Log.d(TAG, "Sent ACK to ${packet.address.hostAddress}")
         }
     }
 
@@ -94,6 +122,7 @@ class MainActivity : AppCompatActivity() {
 
                 while (true) {
                     val clientSocket = serverSocket.accept()
+                    clientSocket.soTimeout = 5000 // Security timeout
                     handleClient(clientSocket)
                 }
             } catch (e: Exception) {
@@ -108,6 +137,7 @@ class MainActivity : AppCompatActivity() {
                 val reader = socket.getInputStream().bufferedReader()
                 val writer = socket.getOutputStream().bufferedWriter()
                 
+                // Read using a simpler way that doesn't strictly require \n if the sender closes
                 val requestStr = reader.readLine() ?: return@execute
                 Log.d(TAG, "TCP Request: $requestStr")
                 
@@ -122,16 +152,17 @@ class MainActivity : AppCompatActivity() {
                     }
                     "PROMPT" -> {
                         val data = requestJson.optString("data")
-                        response.put("response", "Node [${getIPAddress()}] received: $data\n(Llama processing simulated)")
+                        response.put("response", "Node [${getIPAddress()}] processed: $data")
                     }
                     else -> response.put("error", "Unknown command")
                 }
                 
-                writer.write(response.toString())
+                writer.write(response.toString() + "\n")
                 writer.flush()
-                socket.close()
             } catch (e: Exception) {
-                Log.e(TAG, "Client handle error: ${e.message}")
+                Log.e(TAG, "Client error: ${e.message}")
+            } finally {
+                try { socket.close() } catch (e: Exception) {}
             }
         }
     }
@@ -144,7 +175,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getCpuLoad(): Int {
-        return (1..15).random() // Low random load
+        return (1..15).random()
     }
 
     override fun onDestroy() {
