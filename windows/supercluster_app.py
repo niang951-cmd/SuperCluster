@@ -4,7 +4,7 @@
 import sys
 import os
 import socket
-import pickle
+import json
 import threading
 import time
 import webbrowser
@@ -17,7 +17,7 @@ MULTICAST_IP = "239.255.255.250"
 DISCOVERY_PORT = 9999
 TCP_PORT = 8080
 WEB_PORT = 5000
-DISCOVERY_MSG = b"SUPERCLUSTER_DISCOVERY"
+DISCOVERY_MSG = "SUPERCLUSTER_DISCOVERY"
 TIMEOUT = 3
 
 # Changer de répertoire pour être sûr de trouver web_index.html
@@ -159,44 +159,34 @@ class SuperClusterApp:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.settimeout(TIMEOUT)
-            group = socket.inet_aton(MULTICAST_IP)
-            mreq = group + socket.inet_aton('0.0.0.0')
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-            sock.sendto(DISCOVERY_MSG, (MULTICAST_IP, DISCOVERY_PORT))
+            # Pas de membership multicast explicite pour envoyer, seulement bind si on veut recevoir
+            sock.sendto(DISCOVERY_MSG.encode(), (MULTICAST_IP, DISCOVERY_PORT))
+
             ips = set()
             start = time.time()
             while time.time() - start < TIMEOUT:
                 try:
                     data, addr = sock.recvfrom(1024)
-                    if data.decode('utf-8').startswith("SUPERCLUSTER_ACK"):
+                    msg = data.decode('utf-8', errors='ignore')
+                    if msg.startswith("SUPERCLUSTER_ACK"):
                         ips.add(addr[0])
                 except socket.timeout: break
             sock.close()
+
             for ip in ips:
-                ram = self._get_ram(ip)
-                load = self._get_load(ip)
-                if ram is not None:
-                    new_nodes.append((ip, load if load is not None else 999, ram))
-        except Exception as e: print(f"Erreur: {e}")
+                stats = self._get_node_stats(ip)
+                if stats:
+                    new_nodes.append((ip, stats.get('load', 999), stats.get('ram', 0)))
+        except Exception as e: print(f"Erreur découverte: {e}")
         self.root.after(0, lambda: self._update_nodes(new_nodes))
 
-    def _get_ram(self, ip):
+    def _get_node_stats(self, ip):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(2); s.connect((ip, TCP_PORT))
-                s.send(pickle.dumps("GET_RAM"))
-                resp = pickle.loads(s.recv(1024))
-                if resp.startswith("RAM:"): return int(resp.split(":")[1])
-        except: pass
-        return None
-
-    def _get_load(self, ip):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(2); s.connect((ip, TCP_PORT))
-                s.send(pickle.dumps("GET_LOAD"))
-                resp = pickle.loads(s.recv(1024))
-                if resp.startswith("LOAD:"): return int(resp.split(":")[1])
+                s.send(json.dumps({"command": "GET_STATS"}).encode())
+                resp = s.recv(1024).decode()
+                return json.loads(resp)
         except: pass
         return None
 
@@ -240,8 +230,19 @@ class SuperClusterApp:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(60)
                 s.connect((ip, TCP_PORT))
-                s.send(pickle.dumps(prompt))
-                resp = pickle.loads(s.recv(4096))
+                s.send(json.dumps({"command": "PROMPT", "data": prompt}).encode())
+
+                # Attendre la réponse (peut être longue)
+                chunks = []
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk: break
+                    chunks.append(chunk)
+
+                resp_raw = b"".join(chunks).decode()
+                resp_json = json.loads(resp_raw)
+                resp = resp_json.get("response", "Erreur de format")
+
                 self.root.after(0, lambda: self.add_chat_message("🤖 IA", resp, "assistant"))
         except Exception as e:
             self.root.after(0, lambda: self.add_chat_message("❌ Erreur", str(e), "error"))
