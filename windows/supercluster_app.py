@@ -5,9 +5,11 @@ import json
 import threading
 import time
 import webbrowser
+import requests
 import tkinter as tk
 from tkinter import scrolledtext, ttk, messagebox
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from concurrent.futures import ThreadPoolExecutor
 
 # --- Constantes ---
 MULTICAST_IP = "239.255.255.250"
@@ -15,7 +17,7 @@ DISCOVERY_PORT = 9999
 TCP_PORT = 8080
 WEB_PORT = 5000
 DISCOVERY_MSG = "SUPERCLUSTER_DISCOVERY"
-TIMEOUT = 3
+MAX_WORKERS = 100
 
 # Fix working directory
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -38,7 +40,7 @@ class ApkHandler(SimpleHTTPRequestHandler):
             else:
                 self.send_response(404)
                 self.end_headers()
-                self.wfile.write(f"APK not found at {apk_path}".encode())
+                self.wfile.write(f"APK not found".encode())
                 return
         return SimpleHTTPRequestHandler.do_GET(self)
     def log_message(self, format, *args): pass
@@ -55,135 +57,224 @@ def get_local_ip():
 class SuperClusterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("🚀 SuperCluster AI - Contrôleur")
-        self.root.geometry("900x650")
+        self.root.title("🚀 SuperCluster AI - Local Cluster Controller")
+        self.root.geometry("1200x850")
         self.root.configure(bg='#1e1e2e')
-        self.nodes = []
+
+        self.nodes = {}
         self.lock = threading.Lock()
         self.running = True
+        self.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        self.is_scanning = False
 
-        # UI Setup
-        title_frame = tk.Frame(root, bg='#2d2d44', height=60)
-        title_frame.pack(fill=tk.X)
-        tk.Label(title_frame, text="🧠 SuperCluster AI - Controller", font=('Segoe UI', 18, 'bold'), fg='white', bg='#2d2d44').pack(pady=10)
+        # UI State
+        self.ai_mode = tk.StringVar(value="NODE") # "PC" or "NODE"
 
-        self.status_var = tk.StringVar(value="🔍 Recherche...")
-        tk.Label(root, textvariable=self.status_var, bg='#181825', fg='#a6adc8', anchor='w', padx=10).pack(fill=tk.X, side=tk.BOTTOM)
-
-        main_panel = tk.Frame(root, bg='#1e1e2e')
-        main_panel.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # Chat
-        chat_frame = tk.Frame(main_panel, bg='#1e1e2e')
-        chat_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.chat_area = scrolledtext.ScrolledText(chat_frame, bg='#1a1b26', fg='#cdd6f4', font=('Segoe UI', 11))
-        self.chat_area.pack(fill=tk.BOTH, expand=True)
-        self.chat_area.config(state=tk.DISABLED)
-
-        input_frame = tk.Frame(chat_frame, bg='#1e1e2e')
-        input_frame.pack(fill=tk.X, pady=10)
-        self.prompt_entry = tk.Entry(input_frame, bg='#313244', fg='#cdd6f4', font=('Segoe UI', 11))
-        self.prompt_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,10))
-        self.prompt_entry.bind('<Return>', self.send_prompt)
-        tk.Button(input_frame, text="🚀 Envoyer", bg='#89b4fa', command=self.send_prompt).pack(side=tk.RIGHT)
-
-        # Dashboard
-        dash_frame = tk.Frame(main_panel, bg='#181825', width=280)
-        dash_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(10,0))
-        self.node_listbox = tk.Listbox(dash_frame, bg='#1a1b26', fg='#cdd6f4', font=('Segoe UI', 10))
-        self.node_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        tk.Button(dash_frame, text="🔄 Rafraîchir", command=self.discover_nodes).pack(fill=tk.X, padx=5, pady=2)
-        tk.Button(dash_frame, text="⬇️ APK", bg='#a6e3a1', command=lambda: webbrowser.open(f"http://{get_local_ip()}:{WEB_PORT}")).pack(fill=tk.X, padx=5, pady=2)
-
-        self.node_count_label = tk.Label(dash_frame, text="Nœuds: 0", fg='#cdd6f4', bg='#181825')
-        self.node_count_label.pack(pady=5)
+        self.setup_ui()
 
         # Start servers
         threading.Thread(target=HTTPServer(('0.0.0.0', WEB_PORT), ApkHandler).serve_forever, daemon=True).start()
         self.discover_nodes()
-        self.start_auto_discover()
+        self.start_auto_refresh()
+
+    def setup_ui(self):
+        # Header
+        header = tk.Frame(self.root, bg='#2d2d44', height=60)
+        header.pack(fill=tk.X, side=tk.TOP)
+        tk.Label(header, text="🧠 SuperCluster AI - Local Distributed AI", font=('Segoe UI', 18, 'bold'), fg='#89b4fa', bg='#2d2d44').pack(side=tk.LEFT, padx=20, pady=10)
+
+        # Mode Toggle in Header
+        mode_frame = tk.Frame(header, bg='#2d2d44')
+        mode_frame.pack(side=tk.RIGHT, padx=20)
+        tk.Label(mode_frame, text="AI Target:", fg='white', bg='#2d2d44', font=('Segoe UI', 9)).pack(side=tk.LEFT)
+        tk.Radiobutton(mode_frame, text="Nodes (Local)", variable=self.ai_mode, value="NODE", bg='#2d2d44', fg='white', selectcolor='#1e1e2e').pack(side=tk.LEFT, padx=5)
+        tk.Radiobutton(mode_frame, text="PC (Ollama)", variable=self.ai_mode, value="PC", bg='#2d2d44', fg='white', selectcolor='#1e1e2e').pack(side=tk.LEFT, padx=5)
+
+        self.status_var = tk.StringVar(value="🔍 Scan initial...")
+        status_bar = tk.Label(self.root, textvariable=self.status_var, bg='#181825', fg='#a6adc8', anchor='w', padx=10, font=('Consolas', 9))
+        status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+        main_content = tk.Frame(self.root, bg='#1e1e2e')
+        main_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Left Column: Chat
+        left_col = tk.Frame(main_content, bg='#1e1e2e')
+        left_col.place(relx=0, rely=0, relwidth=0.6, relheight=1.0)
+
+        tk.Label(left_col, text="💬 CLUSTER CHAT", font=('Segoe UI', 10, 'bold'), fg='#cdd6f4', bg='#1e1e2e').pack(anchor='w')
+        self.chat_area = scrolledtext.ScrolledText(left_col, bg='#1a1b26', fg='#cdd6f4', font=('Segoe UI', 11), borderwidth=0)
+        self.chat_area.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.chat_area.config(state=tk.DISABLED)
+
+        input_frame = tk.Frame(left_col, bg='#1e1e2e', pady=10)
+        input_frame.pack(fill=tk.X)
+        self.prompt_entry = tk.Entry(input_frame, bg='#313244', fg='#cdd6f4', font=('Segoe UI', 12), insertbackground='white')
+        self.prompt_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,10))
+        self.prompt_entry.bind('<Return>', self.send_prompt)
+        tk.Button(input_frame, text="🚀 SEND", font=('Segoe UI', 9, 'bold'), bg='#89b4fa', fg='#1e1e2e', command=self.send_prompt, padx=20).pack(side=tk.RIGHT)
+
+        # Right Column: Nodes
+        right_col = tk.Frame(main_content, bg='#181825')
+        right_col.place(relx=0.62, rely=0, relwidth=0.38, relheight=1.0)
+
+        stats_frame = tk.Frame(right_col, bg='#2d2d44', pady=5)
+        stats_frame.pack(fill=tk.X)
+        self.node_count_label = tk.Label(stats_frame, text="NODES: 0", font=('Segoe UI', 11, 'bold'), fg='#a6e3a1', bg='#2d2d44')
+        self.node_count_label.pack(side=tk.LEFT, padx=10)
+        self.total_ram_label = tk.Label(stats_frame, text="RAM: 0 GB", font=('Segoe UI', 11, 'bold'), fg='#f9e2af', bg='#2d2d44')
+        self.total_ram_label.pack(side=tk.RIGHT, padx=10)
+
+        tree_frame = tk.Frame(right_col, bg='#181825')
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        tree_scroll = tk.Scrollbar(tree_frame)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree = ttk.Treeview(tree_frame, columns=('ip', 'load', 'ram'), show='headings', yscrollcommand=tree_scroll.set)
+        self.tree.heading('ip', text='IP')
+        self.tree.heading('load', text='Load')
+        self.tree.heading('ram', text='RAM')
+        self.tree.column('ip', width=100)
+        self.tree.column('load', width=50, anchor='center')
+        self.tree.column('ram', width=80, anchor='center')
+        self.tree.pack(fill=tk.BOTH, expand=True)
+        tree_scroll.config(command=self.tree.yview)
+
+        controls = tk.Frame(right_col, bg='#181825', pady=10)
+        controls.pack(fill=tk.X)
+        self.scan_btn = tk.Button(controls, text="🔥 DEEP SCAN", command=self.discover_nodes, bg='#45475a', fg='white', font=('Segoe UI', 9, 'bold'))
+        self.scan_btn.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        tk.Button(controls, text="⬇️ APK", command=lambda: webbrowser.open(f"http://{get_local_ip()}:{WEB_PORT}"), bg='#a6e3a1').pack(side=tk.RIGHT, padx=5)
 
     def discover_nodes(self):
-        self.status_var.set("🔍 Recherche des nœuds...")
-        threading.Thread(target=self._run_discovery, daemon=True).start()
+        if self.is_scanning: return
+        self.is_scanning = True
+        self.scan_btn.config(state=tk.DISABLED, text="SCAN...")
+        threading.Thread(target=self._run_scan, daemon=True).start()
 
-    def _run_discovery(self):
-        ips = set()
-        # 1. Multicast Discovery
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(1)
-            sock.sendto(DISCOVERY_MSG.encode(), (MULTICAST_IP, DISCOVERY_PORT))
-            while True:
-                data, addr = sock.recvfrom(1024)
-                if data.decode().startswith("SUPERCLUSTER_ACK"): ips.add(addr[0])
-        except: pass
+    def _run_scan(self):
+        found_ips = set()
+        local_ip = get_local_ip()
+        subnet = '.'.join(local_ip.split('.')[:-1]) + '.'
 
-        # 2. Broadcast Discovery (Fallback)
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.settimeout(1)
-            sock.sendto(DISCOVERY_MSG.encode(), ('<broadcast>', DISCOVERY_PORT))
-            while True:
-                data, addr = sock.recvfrom(1024)
-                if data.decode().startswith("SUPERCLUSTER_ACK"): ips.add(addr[0])
-        except: pass
+        def udp_scan(target, broadcast=False):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.settimeout(1.5)
+                if broadcast: sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.sendto(DISCOVERY_MSG.encode(), (target, DISCOVERY_PORT))
+                start = time.time()
+                while time.time() - start < 2:
+                    try:
+                        data, addr = sock.recvfrom(1024)
+                        if data.decode().startswith("SUPERCLUSTER_ACK"): found_ips.add(addr[0])
+                    except: break
+            except: pass
+            finally: sock.close()
 
-        new_nodes = []
-        for ip in ips:
-            stats = self._get_node_stats(ip)
-            if stats: new_nodes.append((ip, stats.get('load', 0), stats.get('ram', 0)))
+        threads = [threading.Thread(target=udp_scan, args=(MULTICAST_IP,)), threading.Thread(target=udp_scan, args=('255.255.255.255', True))]
+        for t in threads: t.start()
+        for t in threads: t.join()
 
-        self.root.after(0, lambda: self._update_ui(new_nodes))
+        def check_ip(ip):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.3)
+                    if s.connect_ex((ip, TCP_PORT)) == 0: found_ips.add(ip)
+            except: pass
 
-    def _get_node_stats(self, ip):
+        futures = [self.executor.submit(check_ip, subnet + str(i)) for i in range(1, 255)]
+        for f in futures: f.result()
+
+        active_nodes = {}
+        futures = {self.executor.submit(self._fetch_stats, ip): ip for ip in found_ips}
+        for future in futures:
+            ip = futures[future]
+            stats = future.result()
+            if stats: active_nodes[ip] = stats
+
+        with self.lock: self.nodes = active_nodes
+        self.root.after(0, self._finalize_scan)
+
+    def _fetch_stats(self, ip):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(2)
+                s.settimeout(1.0)
                 s.connect((ip, TCP_PORT))
                 s.send((json.dumps({"command": "GET_STATS"}) + "\n").encode())
                 return json.loads(s.recv(1024).decode())
         except: return None
 
-    def _update_ui(self, new_nodes):
-        with self.lock: self.nodes = new_nodes
-        self.node_listbox.delete(0, tk.END)
-        self.node_count_label.config(text=f"Nœuds: {len(new_nodes)}")
-        for ip, load, ram in new_nodes:
-            self.node_listbox.insert(tk.END, f"🟢 {ip} | Load: {load}% | RAM: {ram/1e9:.1f}GB")
-        self.status_var.set(f"✅ {len(new_nodes)} nœuds trouvés")
+    def _finalize_scan(self):
+        self.tree.delete(*self.tree.get_children())
+        total_ram = 0
+        for ip, stats in self.nodes.items():
+            load, ram = stats.get('load', 0), stats.get('ram', 0)
+            total_ram += ram
+            self.tree.insert('', tk.END, values=(ip, f"{load}%", f"{ram/1e9:.1f} GB"))
+        self.node_count_label.config(text=f"NODES: {len(self.nodes)}")
+        self.total_ram_label.config(text=f"RAM: {total_ram/1e9:.1f} GB")
+        self.is_scanning = False
+        self.scan_btn.config(state=tk.NORMAL, text="🔥 DEEP SCAN")
+        self.status_var.set(f"✅ {len(self.nodes)} nœuds connectés")
 
-    def start_auto_discover(self):
+    def start_auto_refresh(self):
         def loop():
-            while self.running: time.sleep(10); self.discover_nodes()
+            while self.running:
+                time.sleep(12)
+                if not self.is_scanning: self.discover_nodes()
         threading.Thread(target=loop, daemon=True).start()
 
     def send_prompt(self, event=None):
         prompt = self.prompt_entry.get().strip()
-        if not prompt or not self.nodes: return
-        target_ip = self.nodes[0][0]
+        if not prompt: return
         self.prompt_entry.delete(0, tk.END)
-        self.add_msg(f"Vous -> {target_ip}", prompt, "#89b4fa")
-        threading.Thread(target=self._send_to_node, args=(target_ip, prompt), daemon=True).start()
+        self.add_msg("User", prompt, "#89b4fa")
 
-    def _send_to_node(self, ip, prompt):
+        if self.ai_mode.get() == "PC":
+            threading.Thread(target=self._process_with_pc_ollama, args=(prompt,), daemon=True).start()
+        else:
+            if not self.nodes:
+                self.add_msg("System", "No nodes connected to process local request.", "#f38ba8")
+                return
+            # Pick node with least load
+            target_ip = min(self.nodes.items(), key=lambda x: x[1].get('load', 100))[0]
+            threading.Thread(target=self._process_with_node, args=(target_ip, prompt), daemon=True).start()
+
+    def _process_with_pc_ollama(self, prompt):
+        try:
+            payload = {"model": "llama3", "prompt": prompt, "stream": False}
+            resp = requests.post("http://127.0.0.1:11434/api/generate", json=payload, timeout=60)
+            if resp.status_code == 200:
+                ai_resp = resp.json().get("response", "No response")
+                self.root.after(0, lambda: self.add_msg("🤖 PC (Ollama)", ai_resp, "#a6e3a1"))
+            else:
+                self.root.after(0, lambda: self.add_msg("❌ PC Error", f"Status: {resp.status_code}", "#f38ba8"))
+        except:
+            self.root.after(0, lambda: self.add_msg("❌ PC Offline", "Local Ollama service not reachable.", "#f38ba8"))
+
+    def _process_with_node(self, ip, prompt):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(30)
                 s.connect((ip, TCP_PORT))
                 s.send((json.dumps({"command": "PROMPT", "data": prompt}) + "\n").encode())
-                resp = json.loads(s.recv(4096).decode()).get("response", "No response")
-                self.root.after(0, lambda: self.add_msg("🤖 IA", resp, "#a6e3a1"))
+
+                # Attendre la réponse JSON du téléphone
+                resp_raw = b""
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk: break
+                    resp_raw += chunk
+
+                resp = json.loads(resp_raw.decode()).get("response", "Error")
+                self.root.after(0, lambda: self.add_msg(f"📱 Node {ip}", resp, "#f9e2af"))
         except Exception as e:
-            self.root.after(0, lambda: self.add_msg("❌ Erreur", str(e), "#f38ba8"))
+            self.root.after(0, lambda: self.add_msg(f"❌ Node {ip} Error", str(e), "#f38ba8"))
 
     def add_msg(self, sender, text, color):
         self.chat_area.config(state=tk.NORMAL)
         self.chat_area.insert(tk.END, f"{sender}: ", "bold")
         self.chat_area.insert(tk.END, f"{text}\n\n")
-        self.chat_area.tag_config("bold", foreground=color, font=('Segoe UI', 10, 'bold'))
+        self.chat_area.tag_config("bold", foreground=color, font=('Consolas', 10, 'bold'))
         self.chat_area.see(tk.END)
         self.chat_area.config(state=tk.DISABLED)
 

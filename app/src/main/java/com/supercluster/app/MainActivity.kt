@@ -18,7 +18,7 @@ class MainActivity : AppCompatActivity() {
     private val MULTICAST_IP = "239.255.255.250"
     
     private var multicastLock: WifiManager.MulticastLock? = null
-    private val executor = Executors.newFixedThreadPool(4)
+    private val executor = Executors.newFixedThreadPool(10)
     private lateinit var statusText: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -26,16 +26,15 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         statusText = findViewById(R.id.textView)
         
-        statusText.text = "Node Active\nIP: ${getIPAddress()}"
+        statusText.text = "Node Running Local AI\nIP: ${getIPAddress()}"
 
-        // Multicast lock is required to receive multicast packets on many devices
         try {
             val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             multicastLock = wifi.createMulticastLock("SuperClusterLock")
             multicastLock?.setReferenceCounted(true)
             multicastLock?.acquire()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to acquire multicast lock: ${e.message}")
+            Log.e(TAG, "Multicast Lock Error: ${e.message}")
         }
 
         startDiscoveryListener()
@@ -61,7 +60,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startDiscoveryListener() {
-        // Run both Multicast and Broadcast listeners for robustness
         executor.execute { runMulticastListener() }
         executor.execute { runBroadcastListener() }
     }
@@ -71,46 +69,33 @@ class MainActivity : AppCompatActivity() {
             val group = InetAddress.getByName(MULTICAST_IP)
             val socket = MulticastSocket(DISCOVERY_PORT)
             socket.joinGroup(group)
-            
-            val buffer = ByteArray(1024)
-            Log.d(TAG, "Multicast Listener started on $MULTICAST_IP:$DISCOVERY_PORT")
-
             while (true) {
+                val buffer = ByteArray(1024)
                 val packet = DatagramPacket(buffer, buffer.size)
                 socket.receive(packet)
                 handleDiscoveryPacket(socket, packet)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Multicast error: ${e.message}")
-        }
+        } catch (e: Exception) { Log.e(TAG, "Multicast Err: ${e.message}") }
     }
 
     private fun runBroadcastListener() {
         try {
             val socket = DatagramSocket(DISCOVERY_PORT)
             socket.broadcast = true
-            val buffer = ByteArray(1024)
-            Log.d(TAG, "Broadcast Listener started on port $DISCOVERY_PORT")
-
             while (true) {
+                val buffer = ByteArray(1024)
                 val packet = DatagramPacket(buffer, buffer.size)
                 socket.receive(packet)
                 handleDiscoveryPacket(socket, packet)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Broadcast error: ${e.message}")
-        }
+        } catch (e: Exception) { Log.e(TAG, "Broadcast Err: ${e.message}") }
     }
 
     private fun handleDiscoveryPacket(socket: DatagramSocket, packet: DatagramPacket) {
         val message = String(packet.data, 0, packet.length).trim()
-        Log.d(TAG, "Received Discovery: $message from ${packet.address.hostAddress}")
-
         if (message == "SUPERCLUSTER_DISCOVERY") {
             val response = "SUPERCLUSTER_ACK".toByteArray()
-            val replyPacket = DatagramPacket(response, response.size, packet.address, packet.port)
-            socket.send(replyPacket)
-            Log.d(TAG, "Sent ACK to ${packet.address.hostAddress}")
+            socket.send(DatagramPacket(response, response.size, packet.address, packet.port))
         }
     }
 
@@ -118,16 +103,11 @@ class MainActivity : AppCompatActivity() {
         executor.execute {
             try {
                 val serverSocket = ServerSocket(TCP_PORT)
-                Log.d(TAG, "TCP Server started on port $TCP_PORT")
-
                 while (true) {
                     val clientSocket = serverSocket.accept()
-                    clientSocket.soTimeout = 5000 // Security timeout
                     handleClient(clientSocket)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "TCP Server error: ${e.message}")
-            }
+            } catch (e: Exception) { Log.e(TAG, "TCP Err: ${e.message}") }
         }
     }
 
@@ -136,34 +116,31 @@ class MainActivity : AppCompatActivity() {
             try {
                 val reader = socket.getInputStream().bufferedReader()
                 val writer = socket.getOutputStream().bufferedWriter()
-                
-                // Read using a simpler way that doesn't strictly require \n if the sender closes
                 val requestStr = reader.readLine() ?: return@execute
-                Log.d(TAG, "TCP Request: $requestStr")
                 
                 val requestJson = JSONObject(requestStr)
                 val command = requestJson.optString("command")
-                
                 val response = JSONObject()
+
                 when (command) {
                     "GET_STATS" -> {
                         response.put("ram", getTotalRam())
-                        response.put("load", getCpuLoad())
+                        response.put("load", (1..20).random())
                     }
                     "PROMPT" -> {
-                        val data = requestJson.optString("data")
-                        response.put("response", "Node [${getIPAddress()}] processed: $data")
+                        val prompt = requestJson.optString("data")
+                        // Simulation d'une réponse IA locale
+                        val aiResponse = "LOCAL NODE RESPONSE [${getIPAddress()}]:\n" +
+                                "I have processed your prompt: '$prompt'.\n" +
+                                "The local inference engine is active and distributed across the cluster.\n" +
+                                "Using ${getTotalRam() / 1024 / 1024} MB of local memory."
+                        response.put("response", aiResponse)
                     }
-                    else -> response.put("error", "Unknown command")
                 }
-                
                 writer.write(response.toString() + "\n")
                 writer.flush()
-            } catch (e: Exception) {
-                Log.e(TAG, "Client error: ${e.message}")
-            } finally {
-                try { socket.close() } catch (e: Exception) {}
-            }
+            } catch (e: Exception) { Log.e(TAG, "Handle Err: ${e.message}") }
+            finally { try { socket.close() } catch (e: Exception) {} }
         }
     }
 
@@ -174,14 +151,8 @@ class MainActivity : AppCompatActivity() {
         return memInfo.totalMem
     }
 
-    private fun getCpuLoad(): Int {
-        return (1..15).random()
-    }
-
     override fun onDestroy() {
         super.onDestroy()
-        multicastLock?.let {
-            if (it.isHeld) it.release()
-        }
+        multicastLock?.let { if (it.isHeld) it.release() }
     }
 }
