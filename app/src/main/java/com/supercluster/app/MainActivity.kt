@@ -2,16 +2,22 @@ package com.supercluster.app
 
 import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 import java.net.*
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
-    private val TAG = "SuperClusterNode"
     private val DISCOVERY_PORT = 9999
     private val TCP_PORT = 8080
     private val MULTICAST_IP = "239.255.255.250"
@@ -58,11 +64,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startDiscoveryListener() {
-        executor.execute { runDiscovery("Multicast", MulticastSocket(DISCOVERY_PORT).apply { joinGroup(InetAddress.getByName(MULTICAST_IP)) }) }
-        executor.execute { runDiscovery("Broadcast", DatagramSocket(DISCOVERY_PORT).apply { broadcast = true }) }
+        executor.execute { runDiscovery(MulticastSocket(DISCOVERY_PORT).apply { joinGroup(InetAddress.getByName(MULTICAST_IP)) }) }
+        executor.execute { runDiscovery(DatagramSocket(DISCOVERY_PORT).apply { broadcast = true }) }
     }
 
-    private fun runDiscovery(type: String, socket: DatagramSocket) {
+    private fun runDiscovery(socket: DatagramSocket) {
         try {
             val buffer = ByteArray(1024)
             while (true) {
@@ -90,7 +96,8 @@ class MainActivity : AppCompatActivity() {
             try {
                 val reader = socket.getInputStream().bufferedReader()
                 val writer = socket.getOutputStream().bufferedWriter()
-                val request = JSONObject(reader.readLine() ?: return@execute)
+                val line = reader.readLine() ?: return@execute
+                val request = JSONObject(line)
                 val response = JSONObject()
 
                 when (request.optString("command")) {
@@ -106,6 +113,11 @@ class MainActivity : AppCompatActivity() {
                         updateUI("IP: ${getIPAddress()}\nMODE: AI CLUSTER\nMODEL: RESIDENT (${sizeMb}MB)")
                         response.put("response", "LOADED_OK")
                     }
+                    "UPDATE" -> {
+                        val url = request.optString("url")
+                        executor.execute { downloadAndInstallUpdate(url) }
+                        response.put("response", "UPDATING...")
+                    }
                     "PROMPT" -> {
                         val prompt = request.optString("data").lowercase()
                         response.put("response", generateAIResponse(prompt))
@@ -117,20 +129,45 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun downloadAndInstallUpdate(apkUrl: String) {
+        try {
+            updateUI("Downloading Update...\nFrom: $apkUrl")
+            val url = URL(apkUrl)
+            val connection = url.openConnection()
+            connection.connect()
+            
+            val file = File(cacheDir, "update.apk")
+            url.openStream().use { input ->
+                FileOutputStream(file).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            
+            updateUI("Download Complete!\nStarting Installation...")
+            installApk(file)
+        } catch (e: Exception) {
+            updateUI("Update Failed!\nError: ${e.message}")
+        }
+    }
+
+    private fun installApk(file: File) {
+        val uri: Uri = FileProvider.getUriForFile(this, "$packageName.provider", file)
+        val intent = Intent(Intent.ACTION_VIEW)
+        intent.setDataAndType(uri, "application/vnd.android.package-archive")
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
+    }
+
     private fun generateAIResponse(prompt: String): String {
         if (!modelLoaded) return "Error: Model not in RAM."
-        
-        // Simuler une "réflexion" utilisant les données en RAM
         Thread.sleep(800) 
-        
         return when {
             prompt.contains("bonjour") || prompt.contains("hello") -> 
-                "Greetings! This is Cluster Node ${getIPAddress()}. My local 64MB model is active and ready to assist you."
+                "Greetings! This is Cluster Node ${getIPAddress()}. My local 64MB model is active."
             prompt.contains("statut") || prompt.contains("status") ->
-                "Node Health: Optimal. Memory: ${getTotalRam()/1024/1024}MB total, ${modelBytes?.size ?: 0} bytes dedicated to AI weights."
-            prompt.contains("analyse") ->
-                "Analyzing cluster synchronization... Data packets are being distributed across the ${getIPAddress()} interface with 0.4ms latency."
-            else -> "I have processed your request: '$prompt'. The distributed inference engine on this node is currently operating at peak efficiency."
+                "Node Health: Optimal. Memory: ${getTotalRam()/1024/1024}MB total."
+            else -> "I have processed your request: '$prompt'. The distributed engine is operating normally."
         }
     }
 
