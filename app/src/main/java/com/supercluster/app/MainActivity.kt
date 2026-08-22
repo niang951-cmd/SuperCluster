@@ -18,7 +18,7 @@ class MainActivity : AppCompatActivity() {
     private val MULTICAST_IP = "239.255.255.250"
     
     private var multicastLock: WifiManager.MulticastLock? = null
-    private val executor = Executors.newFixedThreadPool(25) // Plenty for handling discovery + tasks
+    private val executor = Executors.newCachedThreadPool() // Dynamic thread pool
     private lateinit var statusText: TextView
     private var modelLoaded = false
     private var modelBytes: ByteArray? = null
@@ -28,12 +28,15 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         statusText = findViewById(R.id.textView)
         
-        val ip = getIPAddress()
-        statusText.text = "SUPERCLUSTER NODE ACTIVE\n\nIP: $ip\nStatus: Waiting for Model\nRAM: ${getTotalRam()/1024/1024} MB"
+        updateStatus("Ready\nIP: ${getIPAddress()}\nRAM: ${getTotalRam()/1024/1024} MB")
 
         setupNetworking()
         startDiscoveryListener()
         startTcpServer()
+    }
+
+    private fun updateStatus(text: String) {
+        runOnUiThread { statusText.text = "SUPERCLUSTER NODE\n\n$text" }
     }
 
     private fun setupNetworking() {
@@ -42,7 +45,7 @@ class MainActivity : AppCompatActivity() {
             multicastLock = wifi.createMulticastLock("SuperClusterLock")
             multicastLock?.setReferenceCounted(true)
             multicastLock?.acquire()
-        } catch (e: Exception) { Log.e(TAG, "Net Setup: ${e.message}") }
+        } catch (e: Exception) { Log.e(TAG, "Net Error: ${e.message}") }
     }
 
     private fun getIPAddress(): String {
@@ -57,12 +60,11 @@ class MainActivity : AppCompatActivity() {
                     if (addr is Inet4Address) return addr.hostAddress ?: "Unknown"
                 }
             }
-        } catch (e: Exception) { e.printStackTrace() }
+        } catch (e: Exception) {}
         return "Unknown"
     }
 
     private fun startDiscoveryListener() {
-        // Robust discovery: Listen on both standard UDP and Multicast
         executor.execute { runMulticastListener() }
         executor.execute { runBroadcastListener() }
     }
@@ -78,7 +80,7 @@ class MainActivity : AppCompatActivity() {
                 socket.receive(packet)
                 handleDiscoveryPacket(socket, packet)
             }
-        } catch (e: Exception) { Log.e(TAG, "Multicast: ${e.message}") }
+        } catch (e: Exception) {}
     }
 
     private fun runBroadcastListener() {
@@ -91,7 +93,7 @@ class MainActivity : AppCompatActivity() {
                 socket.receive(packet)
                 handleDiscoveryPacket(socket, packet)
             }
-        } catch (e: Exception) { Log.e(TAG, "Broadcast: ${e.message}") }
+        } catch (e: Exception) {}
     }
 
     private fun handleDiscoveryPacket(socket: DatagramSocket, packet: DatagramPacket) {
@@ -100,7 +102,6 @@ class MainActivity : AppCompatActivity() {
             val response = "SUPERCLUSTER_ACK".toByteArray()
             try {
                 socket.send(DatagramPacket(response, response.size, packet.address, packet.port))
-                Log.d(TAG, "Replied to discovery from ${packet.address.hostAddress}")
             } catch (e: Exception) {}
         }
     }
@@ -113,13 +114,14 @@ class MainActivity : AppCompatActivity() {
                     val clientSocket = serverSocket.accept()
                     handleClient(clientSocket)
                 }
-            } catch (e: Exception) { Log.e(TAG, "TCP Server: ${e.message}") }
+            } catch (e: Exception) {}
         }
     }
 
     private fun handleClient(socket: Socket) {
         executor.execute {
             try {
+                socket.soTimeout = 10000
                 val reader = socket.getInputStream().bufferedReader()
                 val writer = socket.getOutputStream().bufferedWriter()
                 
@@ -131,26 +133,27 @@ class MainActivity : AppCompatActivity() {
                 when (command) {
                     "GET_STATS" -> {
                         response.put("ram", getTotalRam())
-                        response.put("load", (1..25).random())
+                        response.put("load", (1..20).random())
                         response.put("model_loaded", modelLoaded)
                     }
                     "LOAD_MODEL" -> {
-                        val sizeMb = requestJson.optInt("size_mb", 256)
+                        // Use a much smaller model for better cluster scalability (64MB)
+                        val sizeMb = requestJson.optInt("size_mb", 64)
                         simulateModelLoad(sizeMb)
-                        response.put("response", "SUCCESS: 256MB Reserved in RAM")
+                        response.put("response", "LOADED_OK")
                     }
                     "PROMPT" -> {
                         val prompt = requestJson.optString("data")
                         if (modelLoaded) {
-                            response.put("response", "LOCAL AI [Node ${getIPAddress()}]: Processed '$prompt' using RAM-resident data.")
+                            response.put("response", "Processed on node ${getIPAddress()} using Tiny-Model (64MB RAM)")
                         } else {
-                            response.put("response", "ERROR: Model not in RAM.")
+                            response.put("response", "ERROR_NO_MODEL")
                         }
                     }
                 }
                 writer.write(response.toString() + "\n")
                 writer.flush()
-            } catch (e: Exception) { Log.e(TAG, "Client: ${e.message}") }
+            } catch (e: Exception) {}
             finally { try { socket.close() } catch (e: Exception) {} }
         }
     }
@@ -159,14 +162,10 @@ class MainActivity : AppCompatActivity() {
         try {
             modelBytes = ByteArray(sizeMb * 1024 * 1024) { 0 }
             modelLoaded = true
-            runOnUiThread {
-                statusText.text = "SUPERCLUSTER NODE ACTIVE\n\nIP: ${getIPAddress()}\nStatus: MODEL RESIDENT (RAM)\nModel Size: ${sizeMb}MB"
-            }
+            updateStatus("IP: ${getIPAddress()}\nSTATUS: MODEL IN RAM\nSIZE: ${sizeMb} MB")
         } catch (e: OutOfMemoryError) {
             modelLoaded = false
-            runOnUiThread {
-                statusText.text = "SUPERCLUSTER NODE ACTIVE\n\nIP: ${getIPAddress()}\nStatus: FAILED (OOM - Reduce Model Size)\nRAM: ${getTotalRam()/1024/1024} MB"
-            }
+            updateStatus("IP: ${getIPAddress()}\nSTATUS: MEMORY FULL\nRAM: ${getTotalRam()/1024/1024} MB")
         }
     }
 
