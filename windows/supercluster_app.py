@@ -6,7 +6,7 @@ import threading
 import time
 import webbrowser
 import tkinter as tk
-from tkinter import scrolledtext, ttk, messagebox
+from tkinter import scrolledtext, ttk, messagebox, simpledialog
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -16,7 +16,7 @@ DISCOVERY_PORT = 9999
 TCP_PORT = 8080
 WEB_PORT = 5000
 DISCOVERY_MSG = "SUPERCLUSTER_DISCOVERY"
-MAX_WORKERS = 250
+MAX_WORKERS = 500 # Support pour scan multi-sous-réseaux
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
@@ -46,7 +46,7 @@ def get_local_ip():
 class SuperClusterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("🚀 SuperCluster AI - ULTRA-SCALE")
+        self.root.title("🚀 SuperCluster AI - MEGA CONTROLLER (Pro Discovery)")
         self.root.geometry("1300x850")
         self.root.configure(bg='#1e1e2e')
         self.nodes = {}
@@ -61,65 +61,103 @@ class SuperClusterApp:
 
     def setup_ui(self):
         header = tk.Frame(self.root, bg='#2d2d44', height=70); header.pack(fill=tk.X)
-        tk.Label(header, text="🧠 SuperCluster AI - Massive Controller", font=('Segoe UI', 16, 'bold'), fg='#89b4fa', bg='#2d2d44').pack(side=tk.LEFT, padx=20)
+        tk.Label(header, text="🧠 SuperCluster AI - ULTRA-SCALE", font=('Segoe UI', 16, 'bold'), fg='#89b4fa', bg='#2d2d44').pack(side=tk.LEFT, padx=20)
+
+        btn_manual = tk.Button(header, text="➕ ADD IP", bg='#45475a', fg='white', command=self.add_manual_ip)
+        btn_manual.pack(side=tk.RIGHT, padx=20)
+
         self.status_var = tk.StringVar(value="🔍 Initializing...")
         tk.Label(self.root, textvariable=self.status_var, bg='#181825', fg='#a6adc8', anchor='w', padx=10).pack(fill=tk.X, side=tk.BOTTOM)
+
         main_panel = tk.Frame(self.root, bg='#1e1e2e'); main_panel.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         left_col = tk.Frame(main_panel, bg='#1e1e2e'); left_col.place(relx=0, rely=0, relwidth=0.55, relheight=1.0)
         self.chat_area = scrolledtext.ScrolledText(left_col, bg='#1a1b26', fg='#cdd6f4', font=('Consolas', 11))
         self.chat_area.pack(fill=tk.BOTH, expand=True)
         self.chat_area.config(state=tk.DISABLED)
+
         input_frame = tk.Frame(left_col, bg='#1e1e2e', pady=10); input_frame.pack(fill=tk.X)
         self.prompt_entry = tk.Entry(input_frame, bg='#313244', fg='#cdd6f4', font=('Segoe UI', 12))
         self.prompt_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,10)); self.prompt_entry.bind('<Return>', self.send_prompt)
         tk.Button(input_frame, text="🚀 DISTRIBUTE", bg='#89b4fa', command=self.send_prompt, padx=15).pack(side=tk.RIGHT)
+
         right_col = tk.Frame(main_panel, bg='#181825'); right_col.place(relx=0.57, rely=0, relwidth=0.43, relheight=1.0)
         stats_frame = tk.Frame(right_col, bg='#2d2d44', pady=10); stats_frame.pack(fill=tk.X)
         self.node_count_label = tk.Label(stats_frame, text="NODES: 0", font=('Segoe UI', 12, 'bold'), fg='#a6e3a1', bg='#2d2d44'); self.node_count_label.pack(side=tk.LEFT, padx=15)
         self.total_ram_label = tk.Label(stats_frame, text="RAM: 0 GB", font=('Segoe UI', 12, 'bold'), fg='#f9e2af', bg='#2d2d44'); self.total_ram_label.pack(side=tk.RIGHT, padx=15)
+
         self.tree = ttk.Treeview(right_col, columns=('ip', 'load', 'ram', 'model'), show='headings')
         self.tree.heading('ip', text='Node IP'); self.tree.heading('load', text='Load'); self.tree.heading('ram', text='RAM'); self.tree.heading('model', text='Model')
         self.tree.column('ip', width=120); self.tree.column('load', width=60); self.tree.column('ram', width=80); self.tree.column('model', width=100)
         self.tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
         ctrl = tk.Frame(right_col, bg='#181825', pady=5); ctrl.pack(fill=tk.X)
         tk.Button(ctrl, text="🔥 DEEP SCAN", bg='#45475a', fg='white', command=self.discover_nodes).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         tk.Button(ctrl, text="💾 LOAD MODEL", bg='#f9e2af', command=self.load_model_to_all).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         tk.Button(ctrl, text="⬇️ APK", bg='#a6e3a1', command=lambda: webbrowser.open(f"http://{get_local_ip()}:{WEB_PORT}")).pack(side=tk.RIGHT, padx=2)
 
+    def add_manual_ip(self):
+        ip = simpledialog.askstring("Add Node", "Enter Node IP address:")
+        if ip:
+            self.status_var.set(f"Checking {ip}...")
+            threading.Thread(target=self._manual_check, args=(ip,), daemon=True).start()
+
+    def _manual_check(self, ip):
+        stats = self._get_stats(ip)
+        if stats:
+            with self.lock: self.nodes[ip] = stats
+            self.root.after(0, self._ui_update)
+            self.add_msg("System", f"Manual Node {ip} added successfully!", "#a6e3a1")
+        else:
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Could not connect to {ip} on port {TCP_PORT}"))
+
     def discover_nodes(self):
         if self.is_scanning: return
         self.is_scanning = True
-        self.status_var.set("🚀 Massive network scan...")
+        self.status_var.set("🚀 Robust multi-subnet scan in progress...")
         threading.Thread(target=self._run_massive_scan, daemon=True).start()
 
     def _run_massive_scan(self):
         found_ips = set()
         local_ip = get_local_ip()
-        subnet = '.'.join(local_ip.split('.')[:-1]) + '.'
+        parts = local_ip.split('.')
+
+        # Scan current subnet + common subnets (.0, .1, .2, .100)
+        subnets = {'.'.join(parts[:-1]) + '.'}
+        for s in ['192.168.0.', '192.168.1.', '192.168.2.', '10.0.0.']: subnets.add(s)
 
         def udp_task(target, br=False):
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(1.5)
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(2.0)
                 if br: s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                 s.sendto(DISCOVERY_MSG.encode(), (target, DISCOVERY_PORT))
-                while True:
-                    d, a = s.recvfrom(1024)
-                    if d.decode().startswith("SUPERCLUSTER_ACK"): found_ips.add(a[0])
+                start = time.time()
+                while time.time() - start < 2.5:
+                    try:
+                        d, a = s.recvfrom(1024)
+                        if d.decode().startswith("SUPERCLUSTER_ACK"): found_ips.add(a[0])
+                    except: break
             except: pass
 
-        t1 = threading.Thread(target=udp_task, args=(MULTICAST_IP,)); t2 = threading.Thread(target=udp_task, args=('255.255.255.255', True))
-        t1.start(); t2.start(); t1.join(); t2.join()
+        # 1. UDP discovery
+        threads = [threading.Thread(target=udp_task, args=(MULTICAST_IP,)), threading.Thread(target=udp_task, args=('255.255.255.255', True))]
+        for t in threads: t.start()
+        for t in threads: t.join()
 
+        # 2. Parallel TCP check for all IPs in detected subnets
         def check_node(ip):
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(0.15)
+                    s.settimeout(0.4) # Timeout plus généreux pour le Wi-Fi
                     if s.connect_ex((ip, TCP_PORT)) == 0: found_ips.add(ip)
             except: pass
 
-        # Force execution of all 254 checks
-        list(self.executor.map(check_node, [subnet + str(i) for i in range(1, 255)]))
+        all_target_ips = []
+        for subnet in subnets:
+            for i in range(1, 255): all_target_ips.append(subnet + str(i))
 
+        list(self.executor.map(check_node, all_target_ips))
+
+        # 3. Fetch full stats
         active = {}
         futures = {self.executor.submit(self._get_stats, ip): ip for ip in found_ips}
         for f in as_completed(futures):
@@ -132,7 +170,7 @@ class SuperClusterApp:
     def _get_stats(self, ip):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(1.0); s.connect((ip, TCP_PORT))
+                s.settimeout(1.5); s.connect((ip, TCP_PORT))
                 s.send((json.dumps({"command": "GET_STATS"}) + "\n").encode())
                 return json.loads(s.recv(1024).decode())
         except: return None
@@ -148,8 +186,8 @@ class SuperClusterApp:
         self.is_scanning = False; self.status_var.set(f"✅ Cluster Ready: {len(self.nodes)} nodes")
 
     def load_model_to_all(self):
-        self.add_msg("System", "Loading 256MB Model to all nodes...", "#f9e2af")
-        for ip in self.nodes: self.executor.submit(self._send_load_cmd, ip)
+        self.add_msg("System", "Broadcasting LOAD_MODEL (256MB) to all nodes...", "#f9e2af")
+        for ip in list(self.nodes.keys()): self.executor.submit(self._send_load_cmd, ip)
 
     def _send_load_cmd(self, ip):
         try:
@@ -165,6 +203,7 @@ class SuperClusterApp:
         prompt = self.prompt_entry.get().strip()
         if not prompt or not self.nodes: return
         self.prompt_entry.delete(0, tk.END); self.add_msg("User", prompt, "#89b4fa")
+        # Load balancing: least load
         target = min(self.nodes.items(), key=lambda x: x[1].get('load', 100))[0]
         threading.Thread(target=self._exec_on_node, args=(target, prompt), daemon=True).start()
 
@@ -175,12 +214,13 @@ class SuperClusterApp:
                 s.send((json.dumps({"command": "PROMPT", "data": prompt}) + "\n").encode())
                 resp = json.loads(s.recv(4096).decode()).get("response", "No result")
                 self.root.after(0, lambda: self.add_msg(f"Node {ip}", resp, "#a6e3a1"))
-        except Exception as e: self.root.after(0, lambda: self.add_msg("Error", str(e), "#f38ba8"))
+        except Exception as e:
+            self.root.after(0, lambda: self.add_msg("Error", f"Node {ip}: {str(e)}", "#f38ba8"))
 
     def start_auto_refresh(self):
         def loop():
             while self.running:
-                time.sleep(15)
+                time.sleep(20)
                 if not self.is_scanning: self.discover_nodes()
         threading.Thread(target=loop, daemon=True).start()
 

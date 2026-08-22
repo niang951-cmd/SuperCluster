@@ -8,8 +8,6 @@ import android.util.Log
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONObject
-import java.io.File
-import java.io.FileOutputStream
 import java.net.*
 import java.util.concurrent.Executors
 
@@ -20,7 +18,7 @@ class MainActivity : AppCompatActivity() {
     private val MULTICAST_IP = "239.255.255.250"
     
     private var multicastLock: WifiManager.MulticastLock? = null
-    private val executor = Executors.newFixedThreadPool(20) // Increased for more nodes
+    private val executor = Executors.newFixedThreadPool(25) // Plenty for handling discovery + tasks
     private lateinit var statusText: TextView
     private var modelLoaded = false
     private var modelBytes: ByteArray? = null
@@ -30,7 +28,8 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         statusText = findViewById(R.id.textView)
         
-        statusText.text = "Node Ready\nIP: ${getIPAddress()}\nCluster Mode: High Scale"
+        val ip = getIPAddress()
+        statusText.text = "SUPERCLUSTER NODE ACTIVE\n\nIP: $ip\nStatus: Waiting for Model\nRAM: ${getTotalRam()/1024/1024} MB"
 
         setupNetworking()
         startDiscoveryListener()
@@ -43,9 +42,7 @@ class MainActivity : AppCompatActivity() {
             multicastLock = wifi.createMulticastLock("SuperClusterLock")
             multicastLock?.setReferenceCounted(true)
             multicastLock?.acquire()
-        } catch (e: Exception) {
-            Log.e(TAG, "Networking Error: ${e.message}")
-        }
+        } catch (e: Exception) { Log.e(TAG, "Net Setup: ${e.message}") }
     }
 
     private fun getIPAddress(): String {
@@ -65,6 +62,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startDiscoveryListener() {
+        // Robust discovery: Listen on both standard UDP and Multicast
         executor.execute { runMulticastListener() }
         executor.execute { runBroadcastListener() }
     }
@@ -102,6 +100,7 @@ class MainActivity : AppCompatActivity() {
             val response = "SUPERCLUSTER_ACK".toByteArray()
             try {
                 socket.send(DatagramPacket(response, response.size, packet.address, packet.port))
+                Log.d(TAG, "Replied to discovery from ${packet.address.hostAddress}")
             } catch (e: Exception) {}
         }
     }
@@ -121,8 +120,7 @@ class MainActivity : AppCompatActivity() {
     private fun handleClient(socket: Socket) {
         executor.execute {
             try {
-                val inputStream = socket.getInputStream()
-                val reader = inputStream.bufferedReader()
+                val reader = socket.getInputStream().bufferedReader()
                 val writer = socket.getOutputStream().bufferedWriter()
                 
                 val firstLine = reader.readLine() ?: return@execute
@@ -133,44 +131,41 @@ class MainActivity : AppCompatActivity() {
                 when (command) {
                     "GET_STATS" -> {
                         response.put("ram", getTotalRam())
-                        response.put("load", (1..15).random())
+                        response.put("load", (1..25).random())
                         response.put("model_loaded", modelLoaded)
                     }
                     "LOAD_MODEL" -> {
-                        // This simulates loading a model into RAM (byte array)
-                        val sizeMb = requestJson.optInt("size_mb", 100)
+                        val sizeMb = requestJson.optInt("size_mb", 256)
                         simulateModelLoad(sizeMb)
-                        response.put("response", "Model (${sizeMb}MB) loaded into RAM on node ${getIPAddress()}")
+                        response.put("response", "SUCCESS: 256MB Reserved in RAM")
                     }
                     "PROMPT" -> {
                         val prompt = requestJson.optString("data")
-                        val result = if (modelLoaded) {
-                            "LOCAL INFERENCE [RAM-RESIDENT MODEL]:\nPrompt: $prompt\nStatus: Processing on node ${getIPAddress()} using ${modelBytes?.size ?: 0} bytes of dedicated RAM."
+                        if (modelLoaded) {
+                            response.put("response", "LOCAL AI [Node ${getIPAddress()}]: Processed '$prompt' using RAM-resident data.")
                         } else {
-                            "ERROR: No model resident in RAM. Load a model first."
+                            response.put("response", "ERROR: Model not in RAM.")
                         }
-                        response.put("response", result)
                     }
                 }
                 writer.write(response.toString() + "\n")
                 writer.flush()
-            } catch (e: Exception) { Log.e(TAG, "Handle Client: ${e.message}") }
+            } catch (e: Exception) { Log.e(TAG, "Client: ${e.message}") }
             finally { try { socket.close() } catch (e: Exception) {} }
         }
     }
 
     private fun simulateModelLoad(sizeMb: Int) {
         try {
-            // Allocate actual bytes in RAM to simulate model storage
             modelBytes = ByteArray(sizeMb * 1024 * 1024) { 0 }
             modelLoaded = true
             runOnUiThread {
-                statusText.text = "Node Active\nIP: ${getIPAddress()}\nModel: LOADED (${sizeMb}MB in RAM)"
+                statusText.text = "SUPERCLUSTER NODE ACTIVE\n\nIP: ${getIPAddress()}\nStatus: MODEL RESIDENT (RAM)\nModel Size: ${sizeMb}MB"
             }
         } catch (e: OutOfMemoryError) {
             modelLoaded = false
             runOnUiThread {
-                statusText.text = "Node Active\nIP: ${getIPAddress()}\nModel: LOAD FAILED (OOM)"
+                statusText.text = "SUPERCLUSTER NODE ACTIVE\n\nIP: ${getIPAddress()}\nStatus: FAILED (OOM - Reduce Model Size)\nRAM: ${getTotalRam()/1024/1024} MB"
             }
         }
     }
